@@ -1,0 +1,35 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- BACKGROUND (square; macOS will mask it anyway) -->
+  <rect x="0" y="0" width="1024" height="1024" fill="#0E1625"/>
+
+  <!-- FOLDER -->
+  <g>
+    <path fill="#1F2A44" d="M160 380H430L480 430H864V700H160Z"/>
+    <path fill="#2C3E66" d="M160 430H864V740Q864 780 824 780H200Q160 780 160 740Z"/>
+    <path fill="#FFFFFF" fill-opacity="0.06" d="M160 430H864V468H160Z"/>
+  </g>
+
+  <!-- SERVER RACK -->
+  <g>
+    <rect x="600" y="480" width="200" height="260" rx="18" fill="#0B1220"/>
+    <rect x="600" y="480" width="200" height="260" rx="18" fill="none" stroke="#4C6FFF" stroke-opacity="0.35" stroke-width="3"/>
+
+    <g stroke="#4C6FFF" stroke-width="5" stroke-linecap="round" opacity="0.55">
+      <path d="M620 540H780"/>
+      <path d="M620 600H780"/>
+      <path d="M620 660H780"/>
+    </g>
+
+    <g>
+      <circle cx="640" cy="540" r="7" fill="#3CFF8F" fill-opacity="0.85"/>
+      <circle cx="640" cy="600" r="7" fill="#FFD23C" fill-opacity="0.8"/>
+      <circle cx="640" cy="660" r="7" fill="#3CFF8F" fill-opacity="0.85"/>
+    </g>
+  </g>
+
+  <!-- LOCALHOST LOOP (subtle) -->
+  <g fill="none" stroke="#FFFFFF" stroke-opacity="0.26" stroke-width="18" stroke-linecap="round">
+    <path d="M382 622C444 560 516 560 578 622"/>
+    <path d="M578 622C516 684 444 684 382 622"/>
+  </g>
+</svg>
