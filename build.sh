@@ -183,9 +183,10 @@ pct 55
 step_ok "Caddy"
 
 # Determine latest release + asset urls
-LATEST_JSON="$(curl -fsSL "https://api.github.com/repos/caddyserver/caddy/releases/latest")"
+LATEST_JSON_FILE="$OUT_DIR/caddy-release-latest.json"
+curl -fsSL "https://api.github.com/repos/caddyserver/caddy/releases/latest" -o "$LATEST_JSON_FILE"
 
-VERSION="$(python3 -c 'import json,sys; d=json.loads(sys.argv[1]); print(d.get("tag_name","latest"))' "$LATEST_JSON")"
+VERSION="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("tag_name","latest"))' "$LATEST_JSON_FILE")"
 
 CACHE_VER_DIR="$CADDY_CACHE_DIR/$VERSION"
 AMD_TGZ="$CACHE_VER_DIR/caddy_amd64.tar.gz"
@@ -196,18 +197,18 @@ UNIV_BIN="$CACHE_VER_DIR/caddy_universal"
 
 mkdir -p "$CACHE_VER_DIR"
 
-url_amd="$(python3 -c 'import json,re,sys; d=json.loads(sys.argv[1]);
+url_amd="$(python3 -c 'import json,re,sys; d=json.load(open(sys.argv[1]));
 for a in d.get("assets",[]):
  n=a.get("name","");
- if re.search(r"_darwin_(amd64|x86_64)\.tar\.gz$", n):
+ if re.search(r"_(darwin|mac)_(amd64|x86_64)\.tar\.gz$", n):
   print(a.get("browser_download_url",""));
-  break' "$LATEST_JSON")"
-url_arm="$(python3 -c 'import json,re,sys; d=json.loads(sys.argv[1]);
+  break' "$LATEST_JSON_FILE")"
+url_arm="$(python3 -c 'import json,re,sys; d=json.load(open(sys.argv[1]));
 for a in d.get("assets",[]):
  n=a.get("name","");
- if re.search(r"_darwin_(arm64|aarch64)\.tar\.gz$", n):
+ if re.search(r"_(darwin|mac)_(arm64|aarch64)\.tar\.gz$", n):
   print(a.get("browser_download_url",""));
-  break' "$LATEST_JSON")"
+  break' "$LATEST_JSON_FILE")"
 
 [[ -n "$url_amd" && -n "$url_arm" ]] || die "Could not resolve Caddy download URLs (GitHub API)."
 
