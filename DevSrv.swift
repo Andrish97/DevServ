@@ -13,8 +13,8 @@ import Cocoa
 // MARK: - Models
 
 enum SiteMode: String, Codable {
-    case localhost
-    case domain
+    case localhostPort
+    case hostsDomain
 }
 
 struct Site: Codable, Identifiable, Equatable {
@@ -30,6 +30,11 @@ struct Site: Codable, Identifiable, Equatable {
     var served: Bool
     var shortcut: Bool
 
+    var label: String {
+        get { shortcutLabel }
+        set { shortcutLabel = newValue }
+    }
+
     mutating func normalize() {
         name = name.trimmingCharacters(in: .whitespacesAndNewlines)
         shortcutLabel = shortcutLabel.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -39,19 +44,19 @@ struct Site: Codable, Identifiable, Equatable {
         if shortcutLabel.isEmpty { shortcutLabel = name }
         if name.isEmpty { name = shortcutLabel.isEmpty ? "Site" : shortcutLabel }
 
-        if mode == .localhost, port == nil {
+        if mode == .localhostPort, port == nil {
             port = 3000
         }
-        if mode == .domain {
+        if mode == .hostsDomain {
             port = nil
         }
     }
 
     func urlString() -> String {
         switch mode {
-        case .localhost:
+        case .localhostPort:
             return "https://localhost:\(port ?? 3000)"
-        case .domain:
+        case .hostsDomain:
             return "https://\(domain)"
         }
     }
@@ -205,15 +210,25 @@ final class Store {
 
             // If older schema had something like "port"/"withoutPort" keep it, else false
             let withoutPort = (obj["withoutPort"] as? Bool) ?? false
+            let modeRaw = (obj["mode"] as? String)
+
+            let mode: SiteMode
+            if let modeRaw, let parsed = SiteMode(rawValue: modeRaw) {
+                mode = parsed
+            } else {
+                mode = withoutPort ? .hostsDomain : .localhostPort
+            }
 
             var s = Site(
                 id: id,
                 name: name,
                 shortcutLabel: shortcutLabel,
                 folder: folder,
+                mode: mode,
+                domain: (obj["domain"] as? String) ?? "",
+                port: (obj["port"] as? Int),
                 served: served,
-                shortcut: shortcut,
-                withoutPort: withoutPort
+                shortcut: shortcut
             )
             s.normalize()
             recovered.append(s)
@@ -263,6 +278,16 @@ final class Store {
         sites.filter { $0.served }
     }
 
+    func setServed(id: String, served: Bool) {
+        guard let idx = sites.firstIndex(where: { $0.id == id }) else { return }
+        sites[idx].served = served
+        saveSites()
+    }
+
+    func activeServedSite() -> Site? {
+        sites.first(where: { $0.served })
+    }
+
     func generateCaddyfile() {
         lastError = nil
     
@@ -287,9 +312,9 @@ final class Store {
     
             let host: String
             switch s.mode {
-            case .localhost:
+            case .localhostPort:
                 host = "localhost:\(s.port ?? 3000)"
-            case .domain:
+            case .hostsDomain:
                 host = s.domain
             }
     
@@ -359,7 +384,7 @@ final class CaddyService {
         
         func syncHosts() -> CmdResult {
         let domains = store.servedSites()
-            .filter { $0.mode == .domain }
+            .filter { $0.mode == .hostsDomain }
             .map { $0.domain }
     
         let block = domains.map { "127.0.0.1 \($0)" }.joined(separator: "\n")
@@ -378,11 +403,15 @@ final class CaddyService {
         return Shell.runAsAdmin(script)
     }
 
+    func restoreHosts() -> CmdResult {
+        Shell.runAsAdmin("sed -i '' '/# DEVSRV-BEGIN/,/# DEVSRV-END/d' /etc/hosts")
+    }
+
     func siteStatus(for site: Site) -> SiteStatus {
         if !site.served { return .off }
         if state() != .running { return .error }
 
-        let url = site.withoutPort ? "https://localhost" : "https://localhost:8443"
+        let url = site.urlString()
         let r = Shell.run("/usr/bin/curl", ["-skI", url, "--max-time", "2"], timeoutSec: 3)
         if r.code == 0 && (r.out.contains("200") || r.out.contains("301") || r.out.contains("302")) { return .on }
         return .error
@@ -544,7 +573,7 @@ final class CaddyService {
     func apply() -> CmdResult {
         store.generateCaddyfile()
     
-        let needsAdmin = store.servedSites().contains { $0.mode == .domain }
+        let needsAdmin = store.servedSites().contains { $0.mode == .hostsDomain }
         if needsAdmin {
             let r = syncHosts()
             if r.code != 0 { return r }
@@ -597,7 +626,7 @@ final class LogWindowController: NSWindowController {
 }
 
 
-// MARK: - UI: Site Editor (Label / Folder / Without port)
+// MARK: - UI: Site Editor
 
 final class SiteEditorWindowController: NSWindowController {
 
@@ -607,11 +636,18 @@ final class SiteEditorWindowController: NSWindowController {
     private let folderField = NSTextField()
     private let chooseBtn = NSButton(title: "Choose…", target: nil, action: nil)
 
+    private let modeSwitch = NSSegmentedControl(labels: ["Localhost + port", "Local domain"], trackingMode: .selectOne, target: nil, action: nil)
+
+    private let portField = NSTextField()
+
+    private let siteField = NSTextField()
+    private let siteFromFolderCheck = NSButton(checkboxWithTitle: "Use folder name", target: nil, action: nil)
+    private let domainSuffixPopup = NSPopUpButton()
+    private let customSuffixField = NSTextField()
+    private let domainHint = NSTextField(labelWithString: "You will be asked for administrator password on Apply/Start.")
+
     private let servedCheck = NSButton(checkboxWithTitle: "Serve this site", target: nil, action: nil)
     private let shortcutCheck = NSButton(checkboxWithTitle: "Show shortcut in topbar", target: nil, action: nil)
-
-    private let withoutPortCheck = NSButton(checkboxWithTitle: "Use without port (https://localhost)", target: nil, action: nil)
-    private let withoutPortHint = NSTextField(labelWithString: "Requires admin password (binds to port 443).")
 
     private let previewLabel = NSTextField(labelWithString: "")
     private let warningLabel = NSTextField(labelWithString: "")
@@ -629,7 +665,7 @@ final class SiteEditorWindowController: NSWindowController {
         self.siteId = initial?.id ?? UUID().uuidString
         self.initialSite = initial
 
-        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 760, height: 360),
+        let w = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 460),
                          styleMask: [.titled, .closable],
                          backing: .buffered, defer: false)
         w.title = title
@@ -648,16 +684,25 @@ final class SiteEditorWindowController: NSWindowController {
 
         let pad: CGFloat = 18
 
-        let labelL = label("Label (topbar)")
+        let labelL = label("Label")
         let folderL = label("Folder")
+        let modeL = label("URL mode")
+        let portL = label("Port")
+        let siteL = label("Site")
+        let suffixL = label("Domain suffix")
 
         labelField.placeholderString = "e.g. Familiada"
         folderField.placeholderString = "/Users/.../project"
+        portField.placeholderString = "3000"
+        siteField.placeholderString = "app"
+        customSuffixField.placeholderString = "my-local"
+
+        domainSuffixPopup.addItems(withTitles: ["test", "dev", "local", "localhost", "custom"])
 
         warningLabel.textColor = .systemRed
         previewLabel.textColor = .secondaryLabelColor
-        withoutPortHint.textColor = .secondaryLabelColor
-        withoutPortHint.font = NSFont.systemFont(ofSize: 11)
+        domainHint.textColor = .secondaryLabelColor
+        domainHint.font = NSFont.systemFont(ofSize: 11)
 
         for b in [chooseBtn, saveBtn, cancelBtn] { b.bezelStyle = .rounded }
 
@@ -678,89 +723,209 @@ final class SiteEditorWindowController: NSWindowController {
             folderField.stringValue = s.folder
             servedCheck.state = s.served ? .on : .off
             shortcutCheck.state = s.shortcut ? .on : .off
-            withoutPortCheck.state = s.withoutPort ? .on : .off
+            modeSwitch.selectedSegment = (s.mode == .hostsDomain) ? 1 : 0
+            portField.stringValue = "\(s.port ?? 3000)"
+
+            let parts = s.domain.split(separator: ".", maxSplits: 1).map(String.init)
+            if parts.count == 2 {
+                siteField.stringValue = parts[0]
+                if ["test", "dev", "local", "localhost"].contains(parts[1]) {
+                    domainSuffixPopup.selectItem(withTitle: parts[1])
+                    customSuffixField.stringValue = ""
+                } else {
+                    domainSuffixPopup.selectItem(withTitle: "custom")
+                    customSuffixField.stringValue = parts[1]
+                }
+            } else {
+                siteField.stringValue = parts.first ?? folderNameFromPath(folderField.stringValue)
+                domainSuffixPopup.selectItem(withTitle: "test")
+                customSuffixField.stringValue = ""
+            }
         } else {
             servedCheck.state = .off
             shortcutCheck.state = .on
-            withoutPortCheck.state = .off
+            modeSwitch.selectedSegment = 0
+            portField.stringValue = "3000"
+            siteField.stringValue = ""
+            domainSuffixPopup.selectItem(withTitle: "test")
+            customSuffixField.stringValue = ""
+        }
+
+        siteFromFolderCheck.state = .on
+        if !folderNameFromPath(folderField.stringValue).isEmpty {
+            siteField.stringValue = folderNameFromPath(folderField.stringValue)
         }
 
         // Layout
-        labelL.frame = NSRect(x: pad, y: 310, width: 300, height: 18)
-        labelField.frame = NSRect(x: pad, y: 284, width: 724, height: 24)
+        labelL.frame = NSRect(x: pad, y: 408, width: 300, height: 18)
+        labelField.frame = NSRect(x: pad, y: 382, width: 784, height: 24)
 
-        folderL.frame = NSRect(x: pad, y: 250, width: 300, height: 18)
-        folderField.frame = NSRect(x: pad, y: 224, width: 594, height: 24)
-        chooseBtn.frame = NSRect(x: pad + 624, y: 222, width: 100, height: 28)
+        folderL.frame = NSRect(x: pad, y: 348, width: 300, height: 18)
+        folderField.frame = NSRect(x: pad, y: 322, width: 654, height: 24)
+        chooseBtn.frame = NSRect(x: pad + 684, y: 320, width: 100, height: 28)
 
-        servedCheck.frame = NSRect(x: pad, y: 186, width: 220, height: 22)
-        shortcutCheck.frame = NSRect(x: pad + 240, y: 186, width: 260, height: 22)
+        modeL.frame = NSRect(x: pad, y: 288, width: 200, height: 18)
+        modeSwitch.frame = NSRect(x: pad, y: 262, width: 320, height: 28)
 
-        withoutPortCheck.frame = NSRect(x: pad, y: 150, width: 330, height: 22)
-        withoutPortHint.frame = NSRect(x: pad + 24, y: 130, width: 700, height: 18)
+        portL.frame = NSRect(x: pad, y: 228, width: 200, height: 18)
+        portField.frame = NSRect(x: pad, y: 202, width: 180, height: 24)
 
-        previewLabel.frame = NSRect(x: pad, y: 96, width: 724, height: 18)
-        warningLabel.frame = NSRect(x: pad, y: 76, width: 724, height: 18)
+        siteL.frame = NSRect(x: pad, y: 228, width: 200, height: 18)
+        siteField.frame = NSRect(x: pad, y: 202, width: 260, height: 24)
+        siteFromFolderCheck.frame = NSRect(x: pad + 280, y: 202, width: 180, height: 22)
 
-        cancelBtn.frame = NSRect(x: 760 - pad - 210, y: 18, width: 100, height: 28)
-        saveBtn.frame = NSRect(x: 760 - pad - 105, y: 18, width: 100, height: 28)
+        suffixL.frame = NSRect(x: pad, y: 168, width: 200, height: 18)
+        domainSuffixPopup.frame = NSRect(x: pad, y: 142, width: 180, height: 26)
+        customSuffixField.frame = NSRect(x: pad + 190, y: 142, width: 220, height: 24)
+        domainHint.frame = NSRect(x: pad, y: 120, width: 780, height: 18)
 
-        // resizing
-        folderField.autoresizingMask = [.width]
-        previewLabel.autoresizingMask = [.width]
-        warningLabel.autoresizingMask = [.width]
-        withoutPortHint.autoresizingMask = [.width]
+        servedCheck.frame = NSRect(x: pad, y: 86, width: 220, height: 22)
+        shortcutCheck.frame = NSRect(x: pad + 240, y: 86, width: 260, height: 22)
+
+        previewLabel.frame = NSRect(x: pad, y: 58, width: 784, height: 18)
+        warningLabel.frame = NSRect(x: pad, y: 38, width: 784, height: 18)
+
+        cancelBtn.frame = NSRect(x: 820 - pad - 210, y: 8, width: 100, height: 28)
+        saveBtn.frame = NSRect(x: 820 - pad - 105, y: 8, width: 100, height: 28)
 
         for v in [
             labelL, labelField,
             folderL, folderField, chooseBtn,
+            modeL, modeSwitch,
+            portL, portField,
+            siteL, siteField, siteFromFolderCheck,
+            suffixL, domainSuffixPopup, customSuffixField, domainHint,
             servedCheck, shortcutCheck,
-            withoutPortCheck, withoutPortHint,
             previewLabel, warningLabel,
             cancelBtn, saveBtn
         ] {
             content.addSubview(v)
         }
 
-        for f in [labelField, folderField] {
-            f.target = self
-            f.action = #selector(fieldsChanged)
+        for c in [labelField, folderField, portField, siteField, customSuffixField] {
+            c.target = self
+            c.action = #selector(fieldsChanged)
         }
-        for cb in [servedCheck, shortcutCheck, withoutPortCheck] {
+
+        modeSwitch.target = self
+        modeSwitch.action = #selector(fieldsChanged)
+        siteFromFolderCheck.target = self
+        siteFromFolderCheck.action = #selector(fieldsChanged)
+        domainSuffixPopup.target = self
+        domainSuffixPopup.action = #selector(fieldsChanged)
+
+        for cb in [servedCheck, shortcutCheck] {
             cb.target = self
             cb.action = #selector(fieldsChanged)
         }
 
+        updateModeUI()
         updatePreviewAndValidation()
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
-    @objc private func fieldsChanged() { updatePreviewAndValidation() }
+    @objc private func fieldsChanged() {
+        updateModeUI()
+        updatePreviewAndValidation()
+    }
+
+    private func folderNameFromPath(_ path: String) -> String {
+        URL(fileURLWithPath: path).lastPathComponent
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: " ", with: "-")
+            .lowercased()
+    }
+
+    private func isDomainMode() -> Bool {
+        modeSwitch.selectedSegment == 1
+    }
+
+    private func selectedSuffix() -> String {
+        let selected = domainSuffixPopup.titleOfSelectedItem ?? "test"
+        if selected == "custom" {
+            return customSuffixField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return selected
+    }
+
+    private func builtDomain() -> String {
+        let siteName: String
+        if siteFromFolderCheck.state == .on {
+            siteName = folderNameFromPath(folderField.stringValue)
+        } else {
+            siteName = siteField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        let suffix = selectedSuffix()
+        if siteName.isEmpty { return "" }
+        if suffix.isEmpty { return "" }
+        return "\(siteName).\(suffix)"
+    }
+
+    private func updateModeUI() {
+        let domainMode = isDomainMode()
+
+        portField.isHidden = domainMode
+        portField.superview?.subviews.first(where: { ($0 as? NSTextField)?.stringValue == "Port" })?.isHidden = domainMode
+
+        siteField.isHidden = !domainMode
+        siteFromFolderCheck.isHidden = !domainMode
+        domainSuffixPopup.isHidden = !domainMode
+        customSuffixField.isHidden = !domainMode
+        domainHint.isHidden = !domainMode
+        siteField.isEnabled = (siteFromFolderCheck.state == .off)
+
+        if siteFromFolderCheck.state == .on {
+            siteField.stringValue = folderNameFromPath(folderField.stringValue)
+        }
+
+        customSuffixField.isEnabled = (domainSuffixPopup.titleOfSelectedItem == "custom")
+    }
 
     private func updatePreviewAndValidation() {
         let label = labelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
         let folder = folderField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        let withoutPort = (withoutPortCheck.state == .on)
-
-        let url = withoutPort ? "https://localhost" : "https://localhost:8443"
-        previewLabel.stringValue = "Preview: \(url)  →  \(folder)"
 
         var warn = ""
         var ok = true
 
-        if label.isEmpty { ok = false; warn = "Label is required." }
-        else if folder.isEmpty { ok = false; warn = "Folder is required." }
-        else if !FileManager.default.fileExists(atPath: folder) { ok = false; warn = "Folder does not exist." }
-        else {
+        if label.isEmpty {
+            ok = false; warn = "Label is required."
+        } else if folder.isEmpty {
+            ok = false; warn = "Folder is required."
+        } else if !FileManager.default.fileExists(atPath: folder) {
+            ok = false; warn = "Folder does not exist."
+        } else if isDomainMode() {
+            let domain = builtDomain()
+            if domain.isEmpty {
+                ok = false; warn = "Domain is required."
+            } else if domain.contains(" ") {
+                ok = false; warn = "Domain cannot contain spaces."
+            } else if store.sites.contains(where: { $0.id != siteId && $0.mode == .hostsDomain && $0.domain.lowercased() == domain.lowercased() }) {
+                ok = false; warn = "Domain must be unique."
+            }
+            previewLabel.stringValue = "Preview: https://\(domain)  →  \(folder)"
+        } else {
+            let p = Int(portField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+            if p <= 0 {
+                ok = false; warn = "Port must be greater than 0."
+            } else if store.sites.contains(where: { $0.id != siteId && $0.mode == .localhostPort && ($0.port ?? 3000) == p }) {
+                ok = false; warn = "Port must be unique."
+            }
+            previewLabel.stringValue = "Preview: https://localhost:\(max(p, 0))  →  \(folder)"
+        }
+
+        if warn.isEmpty {
             let tmp = Site(
                 id: siteId,
                 name: initialSite?.name ?? label,
                 shortcutLabel: label,
                 folder: folder,
+                mode: isDomainMode() ? .hostsDomain : .localhostPort,
+                domain: isDomainMode() ? builtDomain() : "localhost",
+                port: isDomainMode() ? nil : (Int(portField.stringValue) ?? 3000),
                 served: servedCheck.state == .on,
-                shortcut: shortcutCheck.state == .on,
-                withoutPort: withoutPort
+                shortcut: shortcutCheck.state == .on
             )
             if !store.indexHtmlExists(for: tmp) {
                 warn = "Warning: index.html not found in folder."
@@ -779,6 +944,10 @@ final class SiteEditorWindowController: NSWindowController {
         panel.prompt = "Choose"
         if panel.runModal() == .OK, let url = panel.url {
             folderField.stringValue = url.path
+            if siteFromFolderCheck.state == .on {
+                siteField.stringValue = folderNameFromPath(url.path)
+            }
+            updateModeUI()
             updatePreviewAndValidation()
         }
     }
@@ -792,9 +961,11 @@ final class SiteEditorWindowController: NSWindowController {
             name: (initialSite?.name ?? label),
             shortcutLabel: label,
             folder: folder,
+            mode: isDomainMode() ? .hostsDomain : .localhostPort,
+            domain: isDomainMode() ? builtDomain() : "localhost",
+            port: isDomainMode() ? nil : (Int(portField.stringValue) ?? 3000),
             served: servedCheck.state == .on,
-            shortcut: shortcutCheck.state == .on,
-            withoutPort: withoutPortCheck.state == .on
+            shortcut: shortcutCheck.state == .on
         )
         s.normalize()
         onSave?(s)
@@ -830,6 +1001,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     private let applyBtn = NSButton(title: "Apply", target: nil, action: nil)
     private let stopAllBtn = NSButton(title: "Stop All", target: nil, action: nil)
     private let logsBtn = NSButton(title: "Logs…", target: nil, action: nil)
+    private let restoreHostsBtn = NSButton(title: "Restore /etc/hosts", target: nil, action: nil)
 
     private var logWin: LogWindowController?
     private var editorWin: SiteEditorWindowController?
@@ -873,9 +1045,8 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             table.addTableColumn(c)
         }
 
-        addCol("label", "Label", 140)
-        addCol("url", "URL", 220)
-        addCol("domain", "Domain", 180)
+        addCol("label", "Label", 170)
+        addCol("url", "Address", 260)
         addCol("port", "Port", 80)
         addCol("folder", "Folder", 320)
         addCol("status", "Status", 90, 110)
@@ -899,8 +1070,9 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         applyBtn.frame = NSRect(x: 18, y: 166, width: 90, height: 28)
         stopAllBtn.frame = NSRect(x: 114, y: 166, width: 90, height: 28)
         logsBtn.frame = NSRect(x: 210, y: 166, width: 90, height: 28)
+        restoreHostsBtn.frame = NSRect(x: 310, y: 166, width: 170, height: 28)
 
-        for b in [addBtn, editBtn, removeBtn, startStopBtn, openBtn, applyBtn, stopAllBtn, logsBtn] {
+        for b in [addBtn, editBtn, removeBtn, startStopBtn, openBtn, applyBtn, stopAllBtn, logsBtn, restoreHostsBtn] {
             b.bezelStyle = .rounded
         }
 
@@ -914,12 +1086,13 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         applyBtn.target = self; applyBtn.action = #selector(applyConfig)
         stopAllBtn.target = self; stopAllBtn.action = #selector(stopAll)
         logsBtn.target = self; logsBtn.action = #selector(showLogs)
+        restoreHostsBtn.target = self; restoreHostsBtn.action = #selector(restoreHosts)
 
         for v in [
             statusLabel, infoLabel, warnLabel,
             scroll,
             addBtn, editBtn, removeBtn, startStopBtn, openBtn,
-            applyBtn, stopAllBtn, logsBtn
+            applyBtn, stopAllBtn, logsBtn, restoreHostsBtn
         ] {
             content.addSubview(v)
         }
@@ -966,6 +1139,8 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
             tf.stringValue = s.shortcutLabel
         case "url":
             tf.stringValue = s.urlString()
+        case "port":
+            tf.stringValue = s.mode == .localhostPort ? "\(s.port ?? 3000)" : "—"
         case "folder":
             tf.stringValue = s.folder
         case "status":
@@ -1059,7 +1234,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
 
         // Toggle, but enforce single served site
         let newServed = !s0.served
-        store.setOnlyServed(id: s0.id, served: newServed)
+        store.setServed(id: s0.id, served: newServed)
         store.loadSites()
 
         // Apply immediately
@@ -1101,6 +1276,17 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         refreshAll(keepSelection: selectedSite()?.id)
     }
 
+
+    @objc private func restoreHosts() {
+        let r = caddy.restoreHosts()
+        if r.code != 0 {
+            warnLabel.stringValue = (r.err.isEmpty ? r.out : r.err)
+        } else {
+            infoLabel.stringValue = "Restored /etc/hosts (DEVSRV block removed)."
+            warnLabel.stringValue = ""
+        }
+    }
+
     @objc private func showLogs() {
         let lw = logWin ?? LogWindowController(title: "DevSrv Logs")
         lw.showWindow(nil)
@@ -1129,7 +1315,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         }
 
         // If active site is withoutPort, show admin hint
-        if let active = store.activeServedSite(), active.withoutPort {
+        if store.servedSites().contains(where: { $0.mode == .hostsDomain }) {
             if infoLabel.stringValue.isEmpty {
                 infoLabel.stringValue = "Without port enabled → admin password will be requested."
             }
@@ -1225,7 +1411,7 @@ final class QuickActionWindowController: NSWindowController {
 
     @objc private func toggleServing() {
         // enforce single served site
-        store.setOnlyServed(id: site.id, served: !site.served)
+        store.setServed(id: site.id, served: !site.served)
         store.loadSites()
         if let latest = store.sites.first(where: { $0.id == site.id }) { site = latest }
 
@@ -1278,7 +1464,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         let shortcuts = store.sites
             .filter { $0.shortcut }
-            .sorted { ($0.shortcutLabel.lowercased()) < ($1.shortcutLabel.lowercased()) }
+            .sorted { ($0.label.lowercased()) < ($1.label.lowercased()) }
 
         if shortcuts.isEmpty {
             let empty = NSMenuItem(title: "(no shortcuts)", action: nil, keyEquivalent: "")
@@ -1286,7 +1472,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             menu.addItem(empty)
         } else {
             for s in shortcuts {
-                let title = s.shortcutLabel.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? s.name : s.shortcutLabel
+                let title = s.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? s.name : s.label
                 let item = NSMenuItem(title: "🌐 \(title)", action: #selector(openQuickAction(_:)), keyEquivalent: "")
                 item.target = self
                 item.representedObject = s.id
