@@ -2,10 +2,10 @@
 set -euo pipefail
 
 # Usage:
-#  build_app.sh [--force-update-caddy] [--use-cached-caddy] [--no-port]
+#  ./build.sh [--force-update-caddy] [--use-cached-caddy] [--no-port]
 #  (GUI przekazuje flagi)
 
-HERE="$(cd "$(dirname "$0")/.." && pwd)"
+HERE="$(cd "$(dirname "$0")" && pwd)"
 cd "$HERE"
 
 APP_NAME="DevSrv"
@@ -39,6 +39,7 @@ step_err(){ echo "@@STEP err \"$1\""; }
 die(){
   step_err "$1"
   log "ERROR: $1"
+  log "Tip: uruchom ./build.sh --help albo sprawdź brakujące narzędzia z komunikatu wyżej."
   exit 1
 }
 
@@ -47,18 +48,48 @@ need_cmd(){
   command -v "$1" >/dev/null 2>&1 || die "Missing tool: $1. Fix: $2"
 }
 
+usage() {
+  cat <<'USAGE'
+DevSrv build helper
+
+Usage:
+  ./build.sh [--force-update-caddy] [--use-cached-caddy] [--no-port]
+  ./build.sh --help
+
+Options:
+  --force-update-caddy   ignore cache and download latest Caddy release again
+  --use-cached-caddy     prefer cached Caddy build (default)
+  --no-port              keep compatibility flag used by GUI
+  --help                 show this help
+
+Examples:
+  ./build.sh
+  ./build.sh --force-update-caddy
+USAGE
+}
+
 # ---- args ----
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --force-update-caddy) FORCE_UPDATE=1; USE_CACHED=0; shift ;;
     --use-cached-caddy)   USE_CACHED=1; FORCE_UPDATE=0; shift ;;
     --no-port)            NO_PORT=1; shift ;;
-    *) die "Unknown arg: $1" ;;
+    --help|-h)            usage; exit 0 ;;
+    *) usage; die "Unknown arg: $1" ;;
   esac
 done
 
 pct 2
 step_ok "Start"
+
+log "Working dir: $HERE"
+if [[ $FORCE_UPDATE -eq 1 ]]; then
+  log "Caddy mode: force update (latest release will be downloaded)"
+elif [[ $USE_CACHED -eq 1 ]]; then
+  log "Caddy mode: use cache when available"
+else
+  log "Caddy mode: download when cache is missing"
+fi
 
 # ---- checks ----
 pct 6
@@ -242,5 +273,8 @@ fi
 
 pct 100
 step_ok "Done"
+log "Build finished successfully"
+log "App artifact: $APP_DIR"
+log "Tip: force fresh Caddy with ./build.sh --force-update-caddy"
 echo "@@ARTIFACT_PATH $APP_DIR"
 echo "@@DONE"
