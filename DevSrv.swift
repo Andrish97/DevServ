@@ -6,7 +6,7 @@ import Cocoa
 // - Per-site "Use without port" toggle:
 //     OFF => https://localhost:8443   (no admin)
 //     ON  => https://localhost        (requires admin; LaunchDaemon)
-// - Single active site at a time (served=true) to avoid localhost conflicts
+// - Multiple sites can be active at the same time (served=true)
 // =======================================================
 
 
@@ -281,6 +281,14 @@ final class Store {
     func setServed(id: String, served: Bool) {
         guard let idx = sites.firstIndex(where: { $0.id == id }) else { return }
         sites[idx].served = served
+
+        saveSites()
+    }
+
+    func clearServedFlags() {
+        for i in sites.indices {
+            sites[i].served = false
+        }
         saveSites()
     }
 
@@ -1232,7 +1240,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
     @objc private func startStopSelected() {
         guard let s0 = selectedSite() else { warnLabel.stringValue = "Select a site first."; return }
 
-        // Toggle, but enforce single served site
+        // Toggle served flag
         let newServed = !s0.served
         store.setServed(id: s0.id, served: newServed)
         store.loadSites()
@@ -1270,8 +1278,7 @@ final class ManagerWindowController: NSWindowController, NSTableViewDataSource, 
         _ = caddy.stopAll()
 
         // Clear served flags
-        for i in store.sites.indices { store.sites[i].served = false }
-        store.saveSites()
+        store.clearServedFlags()
 
         refreshAll(keepSelection: selectedSite()?.id)
     }
@@ -1410,7 +1417,7 @@ final class QuickActionWindowController: NSWindowController {
     }
 
     @objc private func toggleServing() {
-        // enforce single served site
+        // toggle served flag
         store.setServed(id: site.id, served: !site.served)
         store.loadSites()
         if let latest = store.sites.first(where: { $0.id == site.id }) { site = latest }
@@ -1547,8 +1554,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         _ = caddy.stopAll()
         // clear served flags
         store.loadSites()
-        for i in store.sites.indices { store.sites[i].served = false }
-        store.saveSites()
+        store.clearServedFlags()
 
         manager?.refreshAll()
         rebuildTopbarMenu()
