@@ -45,54 +45,6 @@ choose_args_interactive() {
   done
 }
 
-draw_progress() {
-  local percent="$1"
-  local step="$2"
-  local width=34
-  local filled=$(( percent * width / 100 ))
-  local empty=$(( width - filled ))
-  local green=$'\033[32m'
-  local cyan=$'\033[36m'
-  local reset=$'\033[0m'
-  local bar
-  local pad
-
-  printf -v bar "%*s" "$filled" ""
-  bar="${bar// /█}"
-  printf -v pad "%*s" "$empty" ""
-  pad="${pad// /░}"
-
-  printf "\r[DevSrv] ${cyan}[%s%s]${reset} ${green}%3d%%%s %s" "$bar" "$pad" "$percent" "$reset" "$step"
-}
-
-process_build_output() {
-  local line
-  local percent=0
-  local step="Start"
-
-  while IFS= read -r line; do
-    if [[ "$line" == @@PERCENT* ]]; then
-      percent="${line#@@PERCENT }"
-      draw_progress "$percent" "$step"
-    elif [[ "$line" == @@STEP* ]]; then
-      local desc
-      desc="$(printf '%s' "$line" | sed -E 's/^@@STEP [^ ]+ "(.*)"$/\1/')"
-      step="$desc"
-      draw_progress "$percent" "$step"
-      printf "\n"
-    elif [[ "$line" == @@LOG* ]]; then
-      printf "\n[DevSrv] %s\n" "${line#@@LOG }"
-    elif [[ "$line" == @@ARTIFACT_PATH* || "$line" == @@DONE ]]; then
-      :
-    else
-      printf "%s\n" "$line"
-    fi
-  done
-
-  draw_progress 100 "Done"
-  printf "\n"
-}
-
 BUILD_ARGS=("$@")
 if [[ ${#BUILD_ARGS[@]} -eq 0 && -t 0 ]]; then
   choose_args_interactive
@@ -102,7 +54,7 @@ echo "[DevSrv] 🚀 Start build..."
 echo "[DevSrv] 📝 Log: $LOG_FILE"
 
 touch "$LOG_FILE"
-if bash ./build.sh "${BUILD_ARGS[@]}" 2>&1 | tee "$LOG_FILE" | process_build_output; then
+if bash ./build.sh "${BUILD_ARGS[@]}" 2>&1 | tee "$LOG_FILE"; then
   echo "[DevSrv] ✅ Build OK"
   echo "[DevSrv] 📦 App: $HERE/build/DevSrv.app"
 else
